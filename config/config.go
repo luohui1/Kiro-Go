@@ -237,6 +237,16 @@ type Config struct {
 	// default. Set the interval to 0 to disable retry entirely (legacy behavior).
 	Endpoint429RetryMaxWaitMs int `json:"endpoint429RetryMaxWaitMs,omitempty"`
 
+	// Prompt cache accounting mirrors Anthropic/Kiro prompt-cache usage fields.
+	// nil means enabled for backward-compatible default behavior.
+	PromptCacheAccountingEnabled *bool `json:"promptCacheAccountingEnabled,omitempty"`
+	PromptCacheTTLSeconds        int   `json:"promptCacheTtlSeconds,omitempty"`
+
+	// APICache stores successful non-stream API responses for repeated requests.
+	APICacheEnabled          bool `json:"apiCacheEnabled,omitempty"`
+	APICacheTTLSeconds       int  `json:"apiCacheTtlSeconds,omitempty"`
+	APICacheTargetHitPercent int  `json:"apiCacheTargetHitPercent,omitempty"`
+
 	// Proxy configuration: optional outbound proxy for Kiro API requests
 	// Format: "socks5://host:port", "socks5://user:pass@host:port",
 	//         "http://host:port",  "http://user:pass@host:port"
@@ -950,6 +960,106 @@ func UpdateThinkingConfig(suffix, openaiFormat, claudeFormat string) error {
 	cfg.ThinkingSuffix = suffix
 	cfg.OpenAIThinkingFormat = openaiFormat
 	cfg.ClaudeThinkingFormat = claudeFormat
+	return Save()
+}
+
+// PromptCacheConfig holds local prompt-cache accounting settings.
+type PromptCacheConfig struct {
+	AccountingEnabled bool `json:"accountingEnabled"`
+	TTLSeconds        int  `json:"ttlSeconds"`
+}
+
+func normalizePromptCacheTTLSeconds(seconds int) int {
+	switch seconds {
+	case 3600:
+		return 3600
+	default:
+		return 300
+	}
+}
+
+// GetPromptCacheConfig returns prompt-cache accounting settings.
+func GetPromptCacheConfig() PromptCacheConfig {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return PromptCacheConfig{AccountingEnabled: true, TTLSeconds: 300}
+	}
+	enabled := true
+	if cfg.PromptCacheAccountingEnabled != nil {
+		enabled = *cfg.PromptCacheAccountingEnabled
+	}
+	return PromptCacheConfig{
+		AccountingEnabled: enabled,
+		TTLSeconds:        normalizePromptCacheTTLSeconds(cfg.PromptCacheTTLSeconds),
+	}
+}
+
+// UpdatePromptCacheConfig updates prompt-cache accounting settings.
+func UpdatePromptCacheConfig(accountingEnabled *bool, ttlSeconds *int) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if accountingEnabled != nil {
+		enabled := *accountingEnabled
+		cfg.PromptCacheAccountingEnabled = &enabled
+	}
+	if ttlSeconds != nil {
+		cfg.PromptCacheTTLSeconds = normalizePromptCacheTTLSeconds(*ttlSeconds)
+	}
+	return Save()
+}
+
+// APICacheConfig holds local non-stream API response-cache settings.
+type APICacheConfig struct {
+	Enabled          bool `json:"enabled"`
+	TTLSeconds       int  `json:"ttlSeconds"`
+	TargetHitPercent int  `json:"targetHitPercent"`
+}
+
+func normalizeAPICacheTTLSeconds(seconds int) int {
+	if seconds <= 0 {
+		return 3600
+	}
+	return seconds
+}
+
+func normalizeAPICacheTargetHitPercent(percent int) int {
+	if percent <= 0 {
+		return 90
+	}
+	if percent > 100 {
+		return 100
+	}
+	return percent
+}
+
+// GetAPICacheConfig returns non-stream API response-cache settings.
+func GetAPICacheConfig() APICacheConfig {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return APICacheConfig{Enabled: false, TTLSeconds: 3600, TargetHitPercent: 90}
+	}
+	return APICacheConfig{
+		Enabled:          cfg.APICacheEnabled,
+		TTLSeconds:       normalizeAPICacheTTLSeconds(cfg.APICacheTTLSeconds),
+		TargetHitPercent: normalizeAPICacheTargetHitPercent(cfg.APICacheTargetHitPercent),
+	}
+}
+
+// UpdateAPICacheConfig updates non-stream API response-cache settings.
+func UpdateAPICacheConfig(enabled *bool, ttlSeconds, targetHitPercent *int) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if enabled != nil {
+		cfg.APICacheEnabled = *enabled
+	}
+	if ttlSeconds != nil {
+		cfg.APICacheTTLSeconds = normalizeAPICacheTTLSeconds(*ttlSeconds)
+	}
+	if targetHitPercent != nil {
+		cfg.APICacheTargetHitPercent = normalizeAPICacheTargetHitPercent(*targetHitPercent)
+	}
 	return Save()
 }
 

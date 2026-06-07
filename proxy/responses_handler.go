@@ -128,6 +128,21 @@ func (h *Handler) handleResponsesNonStream(
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
 ) {
+	apiCacheKey := buildAPICacheKey("openai-responses", payload, map[string]interface{}{
+		"model":               model,
+		"thinking":            thinking,
+		"previousResponseID":  req.PreviousResponseID,
+		"storeResponse":       storeResponse,
+		"instructions":        req.Instructions,
+		"metadata":            req.Metadata,
+		"responseObjectShape": "responses-v1",
+	})
+	if cached, ok := loadAPICacheIfEnabled(apiCacheKey); ok {
+		h.recordSuccessForApiKey(apiKeyID, 0, 0, 0)
+		writeAPICacheHit(w, cached)
+		return
+	}
+
 	excluded := make(map[string]bool)
 	var lastErr error
 
@@ -199,8 +214,15 @@ func (h *Handler) handleResponsesNonStream(
 			}
 		}
 
+		respBytes, err := json.Marshal(respObj)
+		if err != nil {
+			h.recordFailure()
+			h.sendOpenAIError(w, 500, "server_error", err.Error())
+			return
+		}
+		maybeSaveAPICache(apiCacheKey, respBytes)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		_ = json.NewEncoder(w).Encode(respObj)
+		_, _ = w.Write(respBytes)
 		return
 	}
 

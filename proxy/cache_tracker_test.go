@@ -262,3 +262,70 @@ func TestPromptCacheImplicitBreakpointAtMessageEnd(t *testing.T) {
 		t.Fatalf("expected cache read via implicit message-end breakpoint, got %+v", result)
 	}
 }
+
+func TestPromptCacheHitDoesNotExtendExpiry(t *testing.T) {
+	tracker := newPromptCacheTracker(5 * time.Minute)
+	req := &ClaudeRequest{
+		Model: "claude-sonnet-4.5",
+		System: []interface{}{
+			map[string]interface{}{
+				"type": "text",
+				"text": strings.Repeat("cacheable system prefix ", 260),
+				"cache_control": map[string]interface{}{
+					"type": "ephemeral",
+				},
+			},
+		},
+		Messages: []ClaudeMessage{{Role: "user", Content: "hello"}},
+	}
+
+	profile := tracker.BuildClaudeProfile(req, 2048)
+	if profile == nil {
+		t.Fatalf("expected profile")
+	}
+	tracker.Update("acct-1", profile)
+
+	tracker.mu.Lock()
+	fp := profile.Breakpoints[len(profile.Breakpoints)-1].Fingerprint
+	before := tracker.entriesByAccount["acct-1"][fp].ExpiresAt
+	tracker.mu.Unlock()
+
+	if usage := tracker.Compute("acct-1", profile); usage.CacheReadInputTokens == 0 {
+		t.Fatalf("expected cache read")
+	}
+
+	tracker.mu.Lock()
+	after := tracker.entriesByAccount["acct-1"][fp].ExpiresAt
+	tracker.mu.Unlock()
+
+	if !after.Equal(before) {
+		t.Fatalf("expected cache hit not to extend expiry, before=%v after=%v", before, after)
+	}
+}
+
+func TestPromptCacheUsesToolCacheControl(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	req := &ClaudeRequest{
+		Model: "claude-sonnet-4.5",
+		Tools: []ClaudeTool{{
+			Name:        "Read",
+			Description: strings.Repeat("read files from the workspace ", 220),
+			InputSchema: map[string]interface{}{
+				"type": "object",
+			},
+			CacheControl: map[string]interface{}{
+				"type": "ephemeral",
+				"ttl":  "1h",
+			},
+		}},
+		Messages: []ClaudeMessage{{Role: "user", Content: "hello"}},
+	}
+
+	profile := tracker.BuildClaudeProfile(req, 2048)
+	if profile == nil || len(profile.Breakpoints) == 0 {
+		t.Fatalf("expected tool cache_control to create a cache profile")
+	}
+	if got := profile.Breakpoints[0].TTL; got != time.Hour {
+		t.Fatalf("expected tool cache ttl 1h, got %v", got)
+	}
+}

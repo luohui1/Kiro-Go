@@ -356,6 +356,49 @@ func TestResponsesNonStreamRoundTrip(t *testing.T) {
 	}
 }
 
+func TestResponsesNonStreamUsesAPICacheOnRepeatedRequest(t *testing.T) {
+	h, cleanup := setupResponsesTestHandler(t)
+	defer cleanup()
+
+	enabled := true
+	ttl := 3600
+	target := 100
+	if err := config.UpdateAPICacheConfig(&enabled, &ttl, &target); err != nil {
+		t.Fatalf("enable api cache: %v", err)
+	}
+
+	upstreamCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+			"content": "cached responses OK",
+		}))
+	}))
+	defer server.Close()
+	defer swapKiroEndpointsForTest(t, server)()
+
+	body := `{"model":"claude-sonnet-4.5","input":"cache me","store":false}`
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+		req = req.WithContext(context.Background())
+		rec := httptest.NewRecorder()
+
+		h.handleOpenAIResponses(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d expected 200, got %d body=%s", i+1, rec.Code, rec.Body.String())
+		}
+		if i == 1 && rec.Header().Get("X-Kiro-Cache") != "hit" {
+			t.Fatalf("expected second request to be cache hit, headers=%v", rec.Header())
+		}
+	}
+
+	if upstreamCalls != 1 {
+		t.Fatalf("expected one upstream call after repeated request, got %d", upstreamCalls)
+	}
+}
+
 func TestResponsesStreamSSE(t *testing.T) {
 	h, cleanup := setupResponsesTestHandler(t)
 	defer cleanup()

@@ -188,3 +188,66 @@ func TestEndpoint429RetryKnobDefaultsAndDisable(t *testing.T) {
 		t.Fatalf("expected normalized max-wait to fall back to 25000, got %d", got)
 	}
 }
+
+func TestPromptCacheConfigDefaultsAndUpdate(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+
+	cfg := GetPromptCacheConfig()
+	if !cfg.AccountingEnabled {
+		t.Fatalf("expected prompt cache accounting to default enabled")
+	}
+	if cfg.TTLSeconds != 300 {
+		t.Fatalf("expected default prompt cache ttl 300, got %d", cfg.TTLSeconds)
+	}
+
+	enabled := false
+	ttl := 3600
+	if err := UpdatePromptCacheConfig(&enabled, &ttl); err != nil {
+		t.Fatalf("update prompt cache config: %v", err)
+	}
+
+	cfg = GetPromptCacheConfig()
+	if cfg.AccountingEnabled {
+		t.Fatalf("expected prompt cache accounting to be disabled")
+	}
+	if cfg.TTLSeconds != 3600 {
+		t.Fatalf("expected prompt cache ttl 3600, got %d", cfg.TTLSeconds)
+	}
+}
+
+func TestAPICacheConfigDefaultsAndUpdate(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+
+	cfg := GetAPICacheConfig()
+	if cfg.Enabled {
+		t.Fatalf("expected api cache to default disabled")
+	}
+	if cfg.TTLSeconds != 3600 {
+		t.Fatalf("expected default api cache ttl 3600, got %d", cfg.TTLSeconds)
+	}
+	if cfg.TargetHitPercent != 90 {
+		t.Fatalf("expected default target hit percent 90, got %d", cfg.TargetHitPercent)
+	}
+
+	enabled := true
+	ttl := 7200
+	target := 95
+	if err := UpdateAPICacheConfig(&enabled, &ttl, &target); err != nil {
+		t.Fatalf("update api cache config: %v", err)
+	}
+
+	cfg = GetAPICacheConfig()
+	if !cfg.Enabled {
+		t.Fatalf("expected api cache to be enabled")
+	}
+	if cfg.TTLSeconds != 7200 {
+		t.Fatalf("expected api cache ttl 7200, got %d", cfg.TTLSeconds)
+	}
+	if cfg.TargetHitPercent != 95 {
+		t.Fatalf("expected target hit percent 95, got %d", cfg.TargetHitPercent)
+	}
+}

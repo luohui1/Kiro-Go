@@ -214,6 +214,9 @@ func NewHandler() *Handler {
 	applyProxyConfig(config.GetProxyURL())
 
 	totalReq, successReq, failedReq, totalTokens, totalCredits := config.GetStats()
+	promptCacheCfg := config.GetPromptCacheConfig()
+	promptCache := newPromptCacheTracker(time.Duration(promptCacheCfg.TTLSeconds) * time.Second)
+	promptCache.setEnabled(promptCacheCfg.AccountingEnabled)
 	h := &Handler{
 		pool:            pool.GetPool(),
 		totalRequests:   int64(totalReq),
@@ -224,7 +227,7 @@ func NewHandler() *Handler {
 		startTime:       time.Now().Unix(),
 		stopRefresh:     make(chan struct{}),
 		stopStatsSaver:  make(chan struct{}),
-		promptCache:     newPromptCacheTracker(defaultPromptCacheTTL),
+		promptCache:     promptCache,
 	}
 	// 启动后台刷新
 	go h.backgroundRefresh()
@@ -1341,6 +1344,18 @@ func (h *Handler) recordFailure() {
 
 // handleClaudeNonStream Claude 非流式响应
 func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+	apiCacheKey := buildAPICacheKey("claude-messages", payload, map[string]interface{}{
+		"model":       model,
+		"thinking":    thinking,
+		"format":      thinkingOpts.Format,
+		"omitDisplay": thinkingOpts.OmitDisplay,
+	})
+	if cached, ok := loadAPICacheIfEnabled(apiCacheKey); ok {
+		h.recordSuccessForApiKey(apiKeyID, 0, 0, 0)
+		writeAPICacheHit(w, cached)
+		return
+	}
+
 	excluded := make(map[string]bool)
 	var lastErr error
 
@@ -1445,8 +1460,15 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				Ephemeral1hInputTokens: cacheUsage.CacheCreation1hInputTokens,
 			}
 		}
+		respBytes, err := json.Marshal(resp)
+		if err != nil {
+			h.recordFailure()
+			h.sendClaudeError(w, 500, "api_error", err.Error())
+			return
+		}
+		maybeSaveAPICache(apiCacheKey, respBytes)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		json.NewEncoder(w).Encode(resp)
+		_, _ = w.Write(respBytes)
 		return
 	}
 
@@ -1901,6 +1923,18 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 
 // handleOpenAINonStream OpenAI 非流式响应
 func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
+	thinkingFormat := config.GetThinkingConfig().OpenAIFormat
+	apiCacheKey := buildAPICacheKey("openai-chat", payload, map[string]interface{}{
+		"model":    model,
+		"thinking": thinking,
+		"format":   thinkingFormat,
+	})
+	if cached, ok := loadAPICacheIfEnabled(apiCacheKey); ok {
+		h.recordSuccessForApiKey(apiKeyID, 0, 0, 0)
+		writeAPICacheHit(w, cached)
+		return
+	}
+
 	excluded := make(map[string]bool)
 	var lastErr error
 
@@ -1965,10 +1999,16 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
-		thinkingFormat := config.GetThinkingConfig().OpenAIFormat
 		resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat)
+		respBytes, err := json.Marshal(resp)
+		if err != nil {
+			h.recordFailure()
+			h.sendOpenAIError(w, 500, "server_error", err.Error())
+			return
+		}
+		maybeSaveAPICache(apiCacheKey, respBytes)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		json.NewEncoder(w).Encode(resp)
+		_, _ = w.Write(respBytes)
 		return
 	}
 

@@ -56,6 +56,7 @@ type promptCacheTracker struct {
 	mu               sync.Mutex
 	entriesByAccount map[string]map[[32]byte]promptCacheEntry
 	maxSupportedTTL  time.Duration
+	enabled          bool
 }
 
 func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {
@@ -65,10 +66,15 @@ func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {
 	return &promptCacheTracker{
 		entriesByAccount: make(map[string]map[[32]byte]promptCacheEntry),
 		maxSupportedTTL:  maxTTL,
+		enabled:          true,
 	}
 }
 
 func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTokens int) *promptCacheProfile {
+	if t == nil || !t.enabled {
+		return nil
+	}
+
 	blocks := flattenClaudeCacheBlocks(req)
 	if len(blocks) == 0 {
 		return nil
@@ -91,10 +97,10 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 		//      conversations can hit earlier stored prefixes.
 		breakpointTTL := time.Duration(0)
 		if block.TTL > 0 {
-			breakpointTTL = block.TTL
+			breakpointTTL = t.clampTTL(block.TTL)
 			activeTTL = block.TTL
 		} else if block.IsMessageEnd && activeTTL > 0 {
-			breakpointTTL = activeTTL
+			breakpointTTL = t.clampTTL(activeTTL)
 		}
 
 		if breakpointTTL <= 0 {
@@ -126,7 +132,7 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 }
 
 func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfile) promptCacheUsage {
-	if t == nil || profile == nil || len(profile.Breakpoints) == 0 || accountID == "" {
+	if t == nil || !t.enabled || profile == nil || len(profile.Breakpoints) == 0 || accountID == "" {
 		return promptCacheUsage{}
 	}
 
@@ -174,8 +180,6 @@ func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfi
 		if !ok || entry.ExpiresAt.Before(now) {
 			continue
 		}
-		entry.ExpiresAt = now.Add(entry.TTL)
-		entries[breakpoint.Fingerprint] = entry
 		matchedTokens = minInt(breakpoint.CumulativeTokens, profile.TotalInputTokens)
 		if matchedTokens > lastTokens {
 			matchedTokens = lastTokens
@@ -194,7 +198,7 @@ func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfi
 }
 
 func (t *promptCacheTracker) Update(accountID string, profile *promptCacheProfile) {
-	if t == nil || profile == nil || len(profile.Breakpoints) == 0 || accountID == "" {
+	if t == nil || !t.enabled || profile == nil || len(profile.Breakpoints) == 0 || accountID == "" {
 		return
 	}
 
@@ -220,6 +224,31 @@ func (t *promptCacheTracker) Update(accountID string, profile *promptCacheProfil
 			TTL:       breakpoint.TTL,
 		}
 	}
+}
+
+func (t *promptCacheTracker) setEnabled(enabled bool) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.enabled = enabled
+	if !enabled {
+		t.entriesByAccount = make(map[string]map[[32]byte]promptCacheEntry)
+	}
+}
+
+func (t *promptCacheTracker) clampTTL(ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		return 0
+	}
+	if t == nil || t.maxSupportedTTL <= 0 {
+		return ttl
+	}
+	if ttl > t.maxSupportedTTL {
+		return t.maxSupportedTTL
+	}
+	return ttl
 }
 
 func (t *promptCacheTracker) pruneExpiredLocked(now time.Time) {

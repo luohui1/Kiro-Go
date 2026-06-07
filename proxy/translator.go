@@ -163,9 +163,10 @@ type ImageSource struct {
 }
 
 type ClaudeTool struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	InputSchema interface{} `json:"input_schema"`
+	Name         string      `json:"name"`
+	Description  string      `json:"description"`
+	InputSchema  interface{} `json:"input_schema"`
+	CacheControl interface{} `json:"cache_control,omitempty"`
 }
 
 type ClaudeResponse struct {
