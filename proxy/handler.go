@@ -870,11 +870,12 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account, releaseAccount := h.pool.AcquireNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
 		if err := h.ensureValidToken(account); err != nil {
+			releaseAccount()
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
@@ -1199,6 +1200,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		}
 
 		err := CallKiroAPI(account, payload, callback)
+		releaseAccount()
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -1360,11 +1362,12 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 	var lastErr error
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account, releaseAccount := h.pool.AcquireNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
 		if err := h.ensureValidToken(account); err != nil {
+			releaseAccount()
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
@@ -1403,6 +1406,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 
 		err := CallKiroAPI(account, payload, callback)
+		releaseAccount()
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -1552,11 +1556,12 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	var lastErr error
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account, releaseAccount := h.pool.AcquireNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
 		if err := h.ensureValidToken(account); err != nil {
+			releaseAccount()
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
@@ -1845,6 +1850,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		}
 
 		err := CallKiroAPI(account, payload, callback)
+		releaseAccount()
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -1939,11 +1945,12 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 	var lastErr error
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account, releaseAccount := h.pool.AcquireNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
 		if err := h.ensureValidToken(account); err != nil {
+			releaseAccount()
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
@@ -1974,6 +1981,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 
 		err := CallKiroAPI(account, payload, callback)
+		releaseAccount()
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -3007,12 +3015,13 @@ func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"apiKey":         config.GetApiKey(),
-		"requireApiKey":  config.IsApiKeyRequired(),
-		"port":           config.GetPort(),
-		"host":           config.GetHost(),
-		"allowOverUsage": config.GetAllowOverUsage(),
-		"clientMode":     config.GetClientMode(),
+		"apiKey":                  config.GetApiKey(),
+		"requireApiKey":           config.IsApiKeyRequired(),
+		"port":                    config.GetPort(),
+		"host":                    config.GetHost(),
+		"allowOverUsage":          config.GetAllowOverUsage(),
+		"accountConcurrencyLimit": config.GetAccountConcurrencyLimit(),
+		"clientMode":              config.GetClientMode(),
 	})
 }
 
@@ -3061,11 +3070,12 @@ func (h *Handler) apiUpdatePromptFilter(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ApiKey         *string `json:"apiKey,omitempty"`
-		RequireApiKey  *bool   `json:"requireApiKey,omitempty"`
-		Password       string  `json:"password,omitempty"`
-		AllowOverUsage *bool   `json:"allowOverUsage,omitempty"`
-		ClientMode     *string `json:"clientMode,omitempty"`
+		ApiKey                  *string `json:"apiKey,omitempty"`
+		RequireApiKey           *bool   `json:"requireApiKey,omitempty"`
+		Password                string  `json:"password,omitempty"`
+		AllowOverUsage          *bool   `json:"allowOverUsage,omitempty"`
+		AccountConcurrencyLimit *int    `json:"accountConcurrencyLimit,omitempty"`
+		ClientMode              *string `json:"clientMode,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3102,6 +3112,14 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		// Rebuild the pool so over-quota accounts are re-included or dropped immediately.
 		h.pool.Reload()
+	}
+
+	if req.AccountConcurrencyLimit != nil {
+		if err := config.UpdateAccountConcurrencyLimit(*req.AccountConcurrencyLimit); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
@@ -3151,6 +3169,14 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
 		return
 	}
+
+	releaseAccount, ok := h.pool.AcquireAccount(account.ID)
+	if !ok {
+		w.WriteHeader(429)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account concurrency limit reached"})
+		return
+	}
+	defer releaseAccount()
 
 	if err := h.ensureValidToken(account); err != nil {
 		w.WriteHeader(500)

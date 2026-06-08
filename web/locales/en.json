@@ -93,6 +93,8 @@
   "settings.usageSettings": "Usage Control",
   "settings.allowOverUsage": "Allow Over-Usage",
   "settings.allowOverUsageHint": "When enabled, accounts will continue to serve requests even after their quota is exhausted",
+  "settings.accountConcurrencyLimit": "Per-account concurrency limit",
+  "settings.accountConcurrencyLimitHint": "Maximum simultaneous upstream requests per account. 0 means unlimited; 1 means one request at a time per account.",
   "settings.saveUsage": "Save Usage Changes",
   "settings.overUsageSaved": "Over-usage settings saved",
   "settings.thinkingSettings": "Thinking Mode Settings",

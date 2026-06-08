@@ -209,6 +209,44 @@ func TestGetNextForModelExcludingReturnsNilOnEmptyPool(t *testing.T) {
 	}
 }
 
+func TestAcquireNextForModelExcludingSkipsAccountsAtConcurrencyLimit(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.UpdateAccountConcurrencyLimit(1); err != nil {
+		t.Fatalf("UpdateAccountConcurrencyLimit: %v", err)
+	}
+
+	p := newTestPool(
+		config.Account{ID: "a"},
+		config.Account{ID: "b"},
+	)
+	p.currentIndex = ^uint64(0)
+
+	first, releaseFirst := p.AcquireNextForModelExcluding("model", nil)
+	if first == nil || first.ID != "a" {
+		t.Fatalf("expected first acquire to return a, got %#v", first)
+	}
+	second, releaseSecond := p.AcquireNextForModelExcluding("model", nil)
+	if second == nil || second.ID != "b" {
+		t.Fatalf("expected second acquire to skip busy a and return b, got %#v", second)
+	}
+	third, releaseThird := p.AcquireNextForModelExcluding("model", nil)
+	if third != nil {
+		t.Fatalf("expected nil when every account is at concurrency limit, got %q", third.ID)
+	}
+	releaseThird()
+
+	releaseFirst()
+	again, releaseAgain := p.AcquireNextForModelExcluding("model", nil)
+	if again == nil || again.ID != "a" {
+		t.Fatalf("expected released account a to be selectable again, got %#v", again)
+	}
+
+	releaseAgain()
+	releaseSecond()
+}
+
 // ---------------------------------------------------------------------------
 // DisableAccount
 // ---------------------------------------------------------------------------

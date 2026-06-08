@@ -1568,6 +1568,7 @@
     const d = await res.json();
     $('requireApiKey').checked = d.requireApiKey;
     $('allowOverUsage').checked = d.allowOverUsage || false;
+    $('accountConcurrencyLimit').value = d.accountConcurrencyLimit || 0;
     if ($('clientMode')) $('clientMode').value = d.clientMode || 'kiro-ide';
     await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
     refreshCustomSelects();
@@ -1678,7 +1679,12 @@
   }
   async function saveOverUsageConfig() {
     const allowOverUsage = $('allowOverUsage').checked;
-    await api('/settings', { method: 'POST', body: JSON.stringify({ allowOverUsage }) });
+    let accountConcurrencyLimit = parseInt($('accountConcurrencyLimit').value, 10);
+    if (!Number.isFinite(accountConcurrencyLimit) || accountConcurrencyLimit < 0) {
+      accountConcurrencyLimit = 0;
+      $('accountConcurrencyLimit').value = 0;
+    }
+    await api('/settings', { method: 'POST', body: JSON.stringify({ allowOverUsage, accountConcurrencyLimit }) });
     toast(t('settings.overUsageSaved'), 'success');
   }
   async function saveClientModeConfig() {

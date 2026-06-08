@@ -251,3 +251,27 @@ func TestAPICacheConfigDefaultsAndUpdate(t *testing.T) {
 		t.Fatalf("expected target hit percent 95, got %d", cfg.TargetHitPercent)
 	}
 }
+
+func TestAccountConcurrencyLimitDefaultsAndUpdate(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+
+	if got := GetAccountConcurrencyLimit(); got != 0 {
+		t.Fatalf("expected default account concurrency limit 0, got %d", got)
+	}
+
+	if err := UpdateAccountConcurrencyLimit(2); err != nil {
+		t.Fatalf("update account concurrency limit: %v", err)
+	}
+	if got := GetAccountConcurrencyLimit(); got != 2 {
+		t.Fatalf("expected account concurrency limit 2, got %d", got)
+	}
+
+	if err := UpdateAccountConcurrencyLimit(-1); err != nil {
+		t.Fatalf("update negative account concurrency limit: %v", err)
+	}
+	if got := GetAccountConcurrencyLimit(); got != 0 {
+		t.Fatalf("expected negative account concurrency limit to normalize to 0, got %d", got)
+	}
+}

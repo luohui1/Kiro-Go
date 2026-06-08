@@ -247,6 +247,10 @@ type Config struct {
 	APICacheTTLSeconds       int  `json:"apiCacheTtlSeconds,omitempty"`
 	APICacheTargetHitPercent int  `json:"apiCacheTargetHitPercent,omitempty"`
 
+	// AccountConcurrencyLimit limits simultaneous upstream requests per account.
+	// 0 means unlimited.
+	AccountConcurrencyLimit int `json:"accountConcurrencyLimit,omitempty"`
+
 	// Proxy configuration: optional outbound proxy for Kiro API requests
 	// Format: "socks5://host:port", "socks5://user:pass@host:port",
 	//         "http://host:port",  "http://user:pass@host:port"
@@ -1060,6 +1064,29 @@ func UpdateAPICacheConfig(enabled *bool, ttlSeconds, targetHitPercent *int) erro
 	if targetHitPercent != nil {
 		cfg.APICacheTargetHitPercent = normalizeAPICacheTargetHitPercent(*targetHitPercent)
 	}
+	return Save()
+}
+
+// GetAccountConcurrencyLimit returns the maximum simultaneous upstream
+// requests allowed for each account. 0 means unlimited.
+func GetAccountConcurrencyLimit() int {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || cfg.AccountConcurrencyLimit < 0 {
+		return 0
+	}
+	return cfg.AccountConcurrencyLimit
+}
+
+// UpdateAccountConcurrencyLimit updates the per-account concurrency limit.
+// Negative values are normalized to 0 (unlimited).
+func UpdateAccountConcurrencyLimit(limit int) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if limit < 0 {
+		limit = 0
+	}
+	cfg.AccountConcurrencyLimit = limit
 	return Save()
 }
 

@@ -21,6 +21,7 @@ type AccountPool struct {
 	cooldowns     map[string]time.Time       // 账号冷却时间
 	errorCounts   map[string]int             // 连续错误计数
 	modelLists    map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
+	inFlight      map[string]int             // accountID → active upstream requests
 }
 
 var (
@@ -35,6 +36,7 @@ func GetPool() *AccountPool {
 			cooldowns:   make(map[string]time.Time),
 			errorCounts: make(map[string]int),
 			modelLists:  make(map[string]map[string]bool),
+			inFlight:    make(map[string]int),
 		}
 		pool.Reload()
 	})
@@ -63,6 +65,7 @@ func (p *AccountPool) Reload() {
 	}
 	p.accounts = weighted
 	p.totalAccounts = len(enabled)
+	p.pruneInFlightLocked(enabled)
 }
 
 // GetNext 获取下一个可用账号（加权轮询）
@@ -118,7 +121,7 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 		return acc
 	}
 
-		// 无可用账号，返回冷却时间最短的（排除额度用尽的，除非允许超额）
+	// 无可用账号，返回冷却时间最短的（排除额度用尽的，除非允许超额）
 	var best *config.Account
 	var earliest time.Time
 	for i := range p.accounts {
@@ -256,6 +259,90 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 	return best
 }
 
+// AcquireNextForModelExcluding returns the next available account and reserves
+// one in-flight request slot for it. The returned release function must be
+// called exactly once when the upstream request is finished.
+func (p *AccountPool) AcquireNextForModelExcluding(model string, excluded map[string]bool) (*config.Account, func()) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(p.accounts) == 0 {
+		return nil, noopRelease
+	}
+	p.ensureInFlightLocked()
+
+	limit := config.GetAccountConcurrencyLimit()
+	allowOverUsage := config.GetAllowOverUsage()
+	now := time.Now()
+	n := len(p.accounts)
+	seen := make(map[string]bool)
+
+	for i := 0; i < n; i++ {
+		idx := atomic.AddUint64(&p.currentIndex, 1) % uint64(n)
+		acc := &p.accounts[idx]
+
+		if excluded != nil && excluded[acc.ID] {
+			seen[acc.ID] = true
+			continue
+		}
+		if seen[acc.ID] {
+			continue
+		}
+		if !p.accountHasModel(acc.ID, model) {
+			seen[acc.ID] = true
+			continue
+		}
+		if cooldown, ok := p.cooldowns[acc.ID]; ok && now.Before(cooldown) {
+			seen[acc.ID] = true
+			continue
+		}
+		if acc.ExpiresAt > 0 && time.Now().Unix() > acc.ExpiresAt-tokenRefreshSkewSeconds {
+			seen[acc.ID] = true
+			continue
+		}
+		if isQuotaBlocked(*acc, allowOverUsage) {
+			seen[acc.ID] = true
+			continue
+		}
+		if p.isConcurrencyLimitedLocked(acc.ID, limit) {
+			seen[acc.ID] = true
+			continue
+		}
+		return acc, p.acquireLocked(acc.ID)
+	}
+
+	var best *config.Account
+	var earliest time.Time
+	for i := range p.accounts {
+		acc := &p.accounts[i]
+		if excluded != nil && excluded[acc.ID] {
+			continue
+		}
+		if !p.accountHasModel(acc.ID, model) {
+			continue
+		}
+		if isQuotaBlocked(*acc, allowOverUsage) {
+			continue
+		}
+		if p.isConcurrencyLimitedLocked(acc.ID, limit) {
+			continue
+		}
+		if cooldown, ok := p.cooldowns[acc.ID]; ok {
+			if best == nil || cooldown.Before(earliest) {
+				best = acc
+				earliest = cooldown
+			}
+		} else {
+			return acc, p.acquireLocked(acc.ID)
+		}
+	}
+	if best != nil {
+		return best, p.acquireLocked(best.ID)
+	}
+
+	return nil, noopRelease
+}
+
 // GetByID 根据 ID 获取账号
 func (p *AccountPool) GetByID(id string) *config.Account {
 	p.mu.RLock()
@@ -266,6 +353,68 @@ func (p *AccountPool) GetByID(id string) *config.Account {
 		}
 	}
 	return nil
+}
+
+// AcquireAccount reserves one in-flight request slot for a specific account.
+// It is used by admin/testing paths that bypass normal pool selection.
+func (p *AccountPool) AcquireAccount(id string) (func(), bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ensureInFlightLocked()
+	if p.isConcurrencyLimitedLocked(id, config.GetAccountConcurrencyLimit()) {
+		return noopRelease, false
+	}
+	return p.acquireLocked(id), true
+}
+
+func noopRelease() {}
+
+func (p *AccountPool) ensureInFlightLocked() {
+	if p.inFlight == nil {
+		p.inFlight = make(map[string]int)
+	}
+}
+
+func (p *AccountPool) pruneInFlightLocked(enabled []config.Account) {
+	if p.inFlight == nil {
+		p.inFlight = make(map[string]int)
+		return
+	}
+	keep := make(map[string]bool, len(enabled))
+	for _, acc := range enabled {
+		keep[acc.ID] = true
+	}
+	for id := range p.inFlight {
+		if !keep[id] {
+			delete(p.inFlight, id)
+		}
+	}
+}
+
+func (p *AccountPool) isConcurrencyLimitedLocked(id string, limit int) bool {
+	return limit > 0 && p.inFlight[id] >= limit
+}
+
+func (p *AccountPool) acquireLocked(id string) func() {
+	p.inFlight[id]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			p.release(id)
+		})
+	}
+}
+
+func (p *AccountPool) release(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.inFlight == nil || p.inFlight[id] <= 0 {
+		return
+	}
+	p.inFlight[id]--
+	if p.inFlight[id] == 0 {
+		delete(p.inFlight, id)
+	}
 }
 
 // RecordSuccess 记录请求成功，清除冷却

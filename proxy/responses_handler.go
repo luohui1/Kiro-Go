@@ -147,11 +147,12 @@ func (h *Handler) handleResponsesNonStream(
 	var lastErr error
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account, releaseAccount := h.pool.AcquireNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
 		if err := h.ensureValidToken(account); err != nil {
+			releaseAccount()
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
@@ -181,6 +182,7 @@ func (h *Handler) handleResponsesNonStream(
 		}
 
 		err := CallKiroAPI(account, payload, callback)
+		releaseAccount()
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -337,11 +339,12 @@ func (h *Handler) handleResponsesStream(
 	responseStarted := false
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account, releaseAccount := h.pool.AcquireNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
 		if err := h.ensureValidToken(account); err != nil {
+			releaseAccount()
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
@@ -490,6 +493,7 @@ func (h *Handler) handleResponsesStream(
 		}
 
 		err := CallKiroAPI(account, payload, callback)
+		releaseAccount()
 		if err != nil {
 			if !responseStarted {
 				lastErr = err
