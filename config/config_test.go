@@ -252,26 +252,73 @@ func TestAPICacheConfigDefaultsAndUpdate(t *testing.T) {
 	}
 }
 
-func TestAccountConcurrencyLimitDefaultsAndUpdate(t *testing.T) {
+func TestEffectiveAccountConcurrencyLimitDefaultsAndOverride(t *testing.T) {
+	overrideTwo := 2
+	overrideZero := 0
+	overrideNegative := -1
+
+	cases := []struct {
+		name string
+		acc  *Account
+		want int
+	}{
+		{name: "nil account", acc: nil, want: 0},
+		{name: "power type defaults to 3", acc: &Account{SubscriptionType: "POWER"}, want: 3},
+		{name: "power title defaults to 3", acc: &Account{SubscriptionTitle: "Kiro Power"}, want: 3},
+		{name: "pro defaults to unlimited", acc: &Account{SubscriptionType: "PRO"}, want: 0},
+		{name: "pro plus defaults to unlimited", acc: &Account{SubscriptionType: "PRO_PLUS"}, want: 0},
+		{name: "free defaults to unlimited", acc: &Account{SubscriptionType: "FREE"}, want: 0},
+		{name: "override positive", acc: &Account{SubscriptionType: "POWER", ConcurrencyLimit: &overrideTwo}, want: 2},
+		{name: "override zero unlimited", acc: &Account{SubscriptionType: "POWER", ConcurrencyLimit: &overrideZero}, want: 0},
+		{name: "override negative normalizes to unlimited", acc: &Account{SubscriptionType: "POWER", ConcurrencyLimit: &overrideNegative}, want: 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EffectiveAccountConcurrencyLimit(tc.acc); got != tc.want {
+				t.Fatalf("expected %d, got %d", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestUpdateAccountConcurrencyLimitStoresOverrideAndReset(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
-
-	if got := GetAccountConcurrencyLimit(); got != 0 {
-		t.Fatalf("expected default account concurrency limit 0, got %d", got)
+	if err := AddAccount(Account{ID: "power", Enabled: true, SubscriptionType: "POWER"}); err != nil {
+		t.Fatalf("add account: %v", err)
 	}
 
-	if err := UpdateAccountConcurrencyLimit(2); err != nil {
+	limit := 5
+	if err := UpdateAccountConcurrencyLimit("power", &limit); err != nil {
 		t.Fatalf("update account concurrency limit: %v", err)
 	}
-	if got := GetAccountConcurrencyLimit(); got != 2 {
-		t.Fatalf("expected account concurrency limit 2, got %d", got)
+	accounts := GetAccounts()
+	if accounts[0].ConcurrencyLimit == nil || *accounts[0].ConcurrencyLimit != 5 {
+		t.Fatalf("expected stored account override 5, got %#v", accounts[0].ConcurrencyLimit)
+	}
+	if got := EffectiveAccountConcurrencyLimit(&accounts[0]); got != 5 {
+		t.Fatalf("expected effective override 5, got %d", got)
 	}
 
-	if err := UpdateAccountConcurrencyLimit(-1); err != nil {
+	negative := -1
+	if err := UpdateAccountConcurrencyLimit("power", &negative); err != nil {
 		t.Fatalf("update negative account concurrency limit: %v", err)
 	}
-	if got := GetAccountConcurrencyLimit(); got != 0 {
-		t.Fatalf("expected negative account concurrency limit to normalize to 0, got %d", got)
+	accounts = GetAccounts()
+	if accounts[0].ConcurrencyLimit == nil || *accounts[0].ConcurrencyLimit != 0 {
+		t.Fatalf("expected negative override to store 0, got %#v", accounts[0].ConcurrencyLimit)
+	}
+
+	if err := UpdateAccountConcurrencyLimit("power", nil); err != nil {
+		t.Fatalf("reset account concurrency limit: %v", err)
+	}
+	accounts = GetAccounts()
+	if accounts[0].ConcurrencyLimit != nil {
+		t.Fatalf("expected override reset to nil, got %#v", accounts[0].ConcurrencyLimit)
+	}
+	if got := EffectiveAccountConcurrencyLimit(&accounts[0]); got != 3 {
+		t.Fatalf("expected reset Power account to default 3, got %d", got)
 	}
 }

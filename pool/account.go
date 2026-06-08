@@ -271,7 +271,6 @@ func (p *AccountPool) AcquireNextForModelExcluding(model string, excluded map[st
 	}
 	p.ensureInFlightLocked()
 
-	limit := config.GetAccountConcurrencyLimit()
 	allowOverUsage := config.GetAllowOverUsage()
 	now := time.Now()
 	n := len(p.accounts)
@@ -304,7 +303,7 @@ func (p *AccountPool) AcquireNextForModelExcluding(model string, excluded map[st
 			seen[acc.ID] = true
 			continue
 		}
-		if p.isConcurrencyLimitedLocked(acc.ID, limit) {
+		if p.isConcurrencyLimitedLocked(acc.ID, config.EffectiveAccountConcurrencyLimit(acc)) {
 			seen[acc.ID] = true
 			continue
 		}
@@ -324,7 +323,7 @@ func (p *AccountPool) AcquireNextForModelExcluding(model string, excluded map[st
 		if isQuotaBlocked(*acc, allowOverUsage) {
 			continue
 		}
-		if p.isConcurrencyLimitedLocked(acc.ID, limit) {
+		if p.isConcurrencyLimitedLocked(acc.ID, config.EffectiveAccountConcurrencyLimit(acc)) {
 			continue
 		}
 		if cooldown, ok := p.cooldowns[acc.ID]; ok {
@@ -357,14 +356,17 @@ func (p *AccountPool) GetByID(id string) *config.Account {
 
 // AcquireAccount reserves one in-flight request slot for a specific account.
 // It is used by admin/testing paths that bypass normal pool selection.
-func (p *AccountPool) AcquireAccount(id string) (func(), bool) {
+func (p *AccountPool) AcquireAccount(account *config.Account) (func(), bool) {
+	if account == nil {
+		return noopRelease, false
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.ensureInFlightLocked()
-	if p.isConcurrencyLimitedLocked(id, config.GetAccountConcurrencyLimit()) {
+	if p.isConcurrencyLimitedLocked(account.ID, config.EffectiveAccountConcurrencyLimit(account)) {
 		return noopRelease, false
 	}
-	return p.acquireLocked(id), true
+	return p.acquireLocked(account.ID), true
 }
 
 func noopRelease() {}

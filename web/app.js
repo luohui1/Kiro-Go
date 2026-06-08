@@ -746,6 +746,27 @@
     if (s.includes('PRO')) return '<span class="badge badge-pro">' + escapeHtml(formatSubscriptionLabel(type)) + '</span>';
     return '<span class="badge badge-free">' + escapeHtml(formatSubscriptionLabel(type)) + '</span>';
   }
+  function formatConcurrencyLimit(limit) {
+    const n = Number(limit) || 0;
+    return n <= 0 ? t('accounts.concurrencyUnlimited') : String(n);
+  }
+  function parseConcurrencyLimitInput(id, allowBlank) {
+    const el = $(id);
+    const raw = (el ? el.value : '').trim();
+    if (raw === '') return allowBlank ? null : undefined;
+    let limit = parseInt(raw, 10);
+    if (!Number.isFinite(limit) || limit < 0) limit = 0;
+    if (el) el.value = String(limit);
+    return limit;
+  }
+  function getConcurrencyBadge(a) {
+    const effective = formatConcurrencyLimit(a.effectiveConcurrencyLimit);
+    const custom = a.concurrencyLimit !== null && a.concurrencyLimit !== undefined;
+    const title = custom ? t('accounts.concurrencyCustom') : t('accounts.concurrencyDefault');
+    return '<span class="badge badge-meta" title="' + escapeAttr(title) + '">' +
+      escapeHtml(t('accounts.concurrencyShort') + ':' + effective + (custom ? '*' : '')) +
+      '</span>';
+  }
   function getTrialBadge(a) {
     if (a.trialStatus === 'ACTIVE' && a.trialUsageLimit > 0) {
       return '<span class="badge badge-trial">' + escapeHtml(t('accounts.trial')) + '</span>';
@@ -903,6 +924,7 @@
         overageBadge +
         '<span class="badge badge-info">' + escapeHtml(formatAuthMethod(a.provider || a.authMethod)) + '</span>' +
         getStatusBadge(a) +
+        getConcurrencyBadge(a) +
         getMetaBadges(a) +
         '</div>' +
         '</div>' +
@@ -1036,6 +1058,44 @@
       toast((e && e.message) || t('common.failed'), 'error');
     }
   }
+  async function batchSetConcurrency(reset) {
+    const ids = Array.from(selectedAccounts);
+    if (!ids.length) return;
+    let concurrencyLimit = null;
+    if (!reset) {
+      concurrencyLimit = parseConcurrencyLimitInput('batchConcurrencyLimit', false);
+      if (concurrencyLimit === undefined) {
+        toast(t('batch.concurrencyRequired'), 'warning');
+        return;
+      }
+    }
+    const message = reset
+      ? t('batch.confirmResetConcurrency', ids.length)
+      : t('batch.confirmSetConcurrency', ids.length, formatConcurrencyLimit(concurrencyLimit));
+    const ok = await confirmAction(message, {
+      title: t('detail.concurrencyLimit'),
+      confirmText: t('common.confirm')
+    });
+    if (!ok) return;
+    const dismiss = toast(t('batch.processing'), 'info', { duration: 0 });
+    try {
+      const res = await api('/accounts/batch', {
+        method: 'POST',
+        body: JSON.stringify({ ids, action: 'setConcurrency', concurrencyLimit })
+      });
+      const d = await res.json();
+      if (!res.ok || !d.success) throw new Error(d.error || t('common.failed'));
+      dismiss();
+      toast(t('batch.concurrencyResult', d.count || 0), 'success');
+      selectedAccounts.clear();
+      updateBatchBar();
+      if ($('batchConcurrencyLimit')) $('batchConcurrencyLimit').value = '';
+      loadAccounts();
+    } catch (e) {
+      dismiss();
+      toast((e && e.message) || t('common.failed'), 'error');
+    }
+  }
   async function batchRefreshModels() {
     const ids = Array.from(selectedAccounts);
     if (!ids.length) return;
@@ -1123,6 +1183,8 @@
     if (!a) return;
     const idAttr = escapeAttr(id);
     const isIdc = String(a.authMethod || '').toLowerCase() === 'idc';
+    const concurrencyValue = a.concurrencyLimit === null || a.concurrencyLimit === undefined ? '' : String(a.concurrencyLimit);
+    const effectiveConcurrency = formatConcurrencyLimit(a.effectiveConcurrencyLimit);
     $('detailBody').innerHTML =
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.basicInfo')) + '</h4><div class="detail-grid">' +
       detailItem(t('detail.email'), getDisplayEmail(a.email, null)) +
@@ -1178,6 +1240,16 @@
       '<button class="btn btn-sm btn-primary" data-detail-action="saveWeight" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
       '</div>' +
       '<p class="detail-help">' + escapeHtml(t('detail.weightHint')) + '</p>' +
+      '</div></div>' +
+
+      '<div class="detail-section"><h4>' + escapeHtml(t('detail.concurrencyLimit')) + '</h4>' +
+      '<div class="detail-field">' +
+      '<div class="detail-field-control">' +
+      '<input type="number" id="concurrencyLimitInput" value="' + escapeAttr(concurrencyValue) + '" min="0" step="1" inputmode="numeric" placeholder="' + escapeAttr(t('detail.concurrencyDefault', effectiveConcurrency)) + '" />' +
+      '<button class="btn btn-sm btn-primary" data-detail-action="saveConcurrency" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
+      '<button class="btn btn-sm btn-outline" data-detail-action="resetConcurrency" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.resetConcurrency')) + '</button>' +
+      '</div>' +
+      '<p class="detail-help">' + escapeHtml(t('detail.concurrencyHint', effectiveConcurrency)) + '</p>' +
       '</div></div>' +
 
       '<div class="detail-section">' +
@@ -1295,6 +1367,11 @@
   async function saveWeight(id) {
     const weight = parseInt($('weightInput').value, 10) || 0;
     await putAccount(id, { weight }, t('detail.saved'));
+  }
+  async function saveAccountConcurrency(id, reset) {
+    const concurrencyLimit = reset ? null : parseConcurrencyLimitInput('concurrencyLimitInput', true);
+    await putAccount(id, { concurrencyLimit }, t('detail.saved'));
+    if (reset && $('concurrencyLimitInput')) $('concurrencyLimitInput').value = '';
   }
   async function saveRegion(id) {
     const regions = $('regionInput').value.split(',').map(function (r) { return r.trim(); }).filter(Boolean);
@@ -1568,7 +1645,6 @@
     const d = await res.json();
     $('requireApiKey').checked = d.requireApiKey;
     $('allowOverUsage').checked = d.allowOverUsage || false;
-    $('accountConcurrencyLimit').value = d.accountConcurrencyLimit || 0;
     if ($('clientMode')) $('clientMode').value = d.clientMode || 'kiro-ide';
     await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
     refreshCustomSelects();
@@ -1679,12 +1755,7 @@
   }
   async function saveOverUsageConfig() {
     const allowOverUsage = $('allowOverUsage').checked;
-    let accountConcurrencyLimit = parseInt($('accountConcurrencyLimit').value, 10);
-    if (!Number.isFinite(accountConcurrencyLimit) || accountConcurrencyLimit < 0) {
-      accountConcurrencyLimit = 0;
-      $('accountConcurrencyLimit').value = 0;
-    }
-    await api('/settings', { method: 'POST', body: JSON.stringify({ allowOverUsage, accountConcurrencyLimit }) });
+    await api('/settings', { method: 'POST', body: JSON.stringify({ allowOverUsage }) });
     toast(t('settings.overUsageSaved'), 'success');
   }
   async function saveClientModeConfig() {
@@ -2811,6 +2882,8 @@
       const a = b.dataset.batch;
       if (a === 'refreshModels') batchRefreshModels();
       else if (a === 'delete') batchDelete();
+      else if (a === 'setConcurrency') batchSetConcurrency(false);
+      else if (a === 'resetConcurrency') batchSetConcurrency(true);
       else batchAction(a);
     }));
 
@@ -2906,6 +2979,8 @@
       const a = b.dataset.detailAction;
       if (a === 'saveMachineId') saveMachineId(id);
       else if (a === 'saveWeight') saveWeight(id);
+      else if (a === 'saveConcurrency') saveAccountConcurrency(id, false);
+      else if (a === 'resetConcurrency') saveAccountConcurrency(id, true);
       else if (a === 'saveRegion') saveRegion(id);
       else if (a === 'discoverRegions') discoverRegions(id);
       else if (a === 'toggleOverage') toggleOverageSwitch(id, b);

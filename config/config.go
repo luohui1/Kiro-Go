@@ -104,6 +104,10 @@ type Account struct {
 	// Priority weight for load balancing (higher = more requests)
 	Weight int `json:"weight,omitempty"` // 0 or 1 = normal, 2+ = higher priority
 
+	// Per-account upstream concurrency override. nil follows the subscription
+	// default; 0 means unlimited.
+	ConcurrencyLimit *int `json:"concurrencyLimit,omitempty"`
+
 	// Upstream Overages state (mirrored from AWS Q `setUserPreference` / `getUsageLimits`).
 	// OverageStatus is the only switch that decides whether to keep dispatching once UsageLimit is reached.
 	// Allowed values: "ENABLED", "DISABLED", "UNKNOWN" (or empty when not yet fetched).
@@ -247,8 +251,9 @@ type Config struct {
 	APICacheTTLSeconds       int  `json:"apiCacheTtlSeconds,omitempty"`
 	APICacheTargetHitPercent int  `json:"apiCacheTargetHitPercent,omitempty"`
 
-	// AccountConcurrencyLimit limits simultaneous upstream requests per account.
-	// 0 means unlimited.
+	// AccountConcurrencyLimit is a legacy global setting kept for JSON
+	// compatibility. New routing uses per-account ConcurrencyLimit plus
+	// subscription defaults.
 	AccountConcurrencyLimit int `json:"accountConcurrencyLimit,omitempty"`
 
 	// Proxy configuration: optional outbound proxy for Kiro API requests
@@ -1067,27 +1072,78 @@ func UpdateAPICacheConfig(enabled *bool, ttlSeconds, targetHitPercent *int) erro
 	return Save()
 }
 
-// GetAccountConcurrencyLimit returns the maximum simultaneous upstream
-// requests allowed for each account. 0 means unlimited.
-func GetAccountConcurrencyLimit() int {
-	cfgLock.RLock()
-	defer cfgLock.RUnlock()
-	if cfg == nil || cfg.AccountConcurrencyLimit < 0 {
+// EffectiveAccountConcurrencyLimit returns the maximum simultaneous upstream
+// requests allowed for an account. 0 means unlimited.
+func EffectiveAccountConcurrencyLimit(account *Account) int {
+	if account == nil {
 		return 0
 	}
-	return cfg.AccountConcurrencyLimit
+	if account.ConcurrencyLimit != nil {
+		if *account.ConcurrencyLimit < 0 {
+			return 0
+		}
+		return *account.ConcurrencyLimit
+	}
+	tier := strings.ToUpper(account.SubscriptionType + " " + account.SubscriptionTitle)
+	if strings.Contains(tier, "POWER") {
+		return 3
+	}
+	return 0
 }
 
-// UpdateAccountConcurrencyLimit updates the per-account concurrency limit.
-// Negative values are normalized to 0 (unlimited).
-func UpdateAccountConcurrencyLimit(limit int) error {
+// UpdateAccountConcurrencyLimit updates an account-level concurrency override.
+// nil clears the override and falls back to subscription defaults. Negative
+// values are normalized to 0 (unlimited).
+func UpdateAccountConcurrencyLimit(id string, limit *int) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
-	if limit < 0 {
-		limit = 0
+	for i, account := range cfg.Accounts {
+		if account.ID != id {
+			continue
+		}
+		if limit == nil {
+			cfg.Accounts[i].ConcurrencyLimit = nil
+		} else {
+			normalized := *limit
+			if normalized < 0 {
+				normalized = 0
+			}
+			cfg.Accounts[i].ConcurrencyLimit = &normalized
+		}
+		return Save()
 	}
-	cfg.AccountConcurrencyLimit = limit
-	return Save()
+	return nil
+}
+
+// UpdateAccountsConcurrencyLimit applies the same account-level concurrency
+// override to multiple accounts and returns the number of matched accounts.
+func UpdateAccountsConcurrencyLimit(ids []string, limit *int) (int, error) {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	idSet := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
+	count := 0
+	for i, account := range cfg.Accounts {
+		if !idSet[account.ID] {
+			continue
+		}
+		count++
+		if limit == nil {
+			cfg.Accounts[i].ConcurrencyLimit = nil
+		} else {
+			normalized := *limit
+			if normalized < 0 {
+				normalized = 0
+			}
+			cfg.Accounts[i].ConcurrencyLimit = &normalized
+		}
+	}
+	if count == 0 {
+		return 0, nil
+	}
+	return count, Save()
 }
 
 // GetPreferredEndpoint 获取首选端点配置

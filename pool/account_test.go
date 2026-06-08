@@ -209,41 +209,70 @@ func TestGetNextForModelExcludingReturnsNilOnEmptyPool(t *testing.T) {
 	}
 }
 
-func TestAcquireNextForModelExcludingSkipsAccountsAtConcurrencyLimit(t *testing.T) {
-	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
-	if err := config.UpdateAccountConcurrencyLimit(1); err != nil {
-		t.Fatalf("UpdateAccountConcurrencyLimit: %v", err)
-	}
+func TestAcquireNextForModelExcludingUsesPowerDefaultConcurrencyLimit(t *testing.T) {
+	p := newTestPool(config.Account{ID: "power", SubscriptionType: "POWER"})
+	p.currentIndex = ^uint64(0)
 
+	var releases []func()
+	for i := 0; i < 3; i++ {
+		acc, release := p.AcquireNextForModelExcluding("model", nil)
+		if acc == nil || acc.ID != "power" {
+			t.Fatalf("expected acquire %d to return power, got %#v", i+1, acc)
+		}
+		releases = append(releases, release)
+	}
+	limited, releaseLimited := p.AcquireNextForModelExcluding("model", nil)
+	if limited != nil {
+		t.Fatalf("expected Power account to be limited after 3 in-flight requests, got %q", limited.ID)
+	}
+	releaseLimited()
+
+	releases[0]()
+	again, releaseAgain := p.AcquireNextForModelExcluding("model", nil)
+	if again == nil || again.ID != "power" {
+		t.Fatalf("expected released Power account to be selectable again, got %#v", again)
+	}
+	releaseAgain()
+	for _, release := range releases[1:] {
+		release()
+	}
+}
+
+func TestAcquireNextForModelExcludingLeavesProUnlimitedByDefault(t *testing.T) {
+	p := newTestPool(config.Account{ID: "pro", SubscriptionType: "PRO"})
+	p.currentIndex = ^uint64(0)
+
+	var releases []func()
+	for i := 0; i < 8; i++ {
+		acc, release := p.AcquireNextForModelExcluding("model", nil)
+		if acc == nil || acc.ID != "pro" {
+			t.Fatalf("expected Pro account to stay selectable on acquire %d, got %#v", i+1, acc)
+		}
+		releases = append(releases, release)
+	}
+	for _, release := range releases {
+		release()
+	}
+}
+
+func TestAcquireNextForModelExcludingUsesAccountConcurrencyOverride(t *testing.T) {
+	limit := 1
 	p := newTestPool(
-		config.Account{ID: "a"},
-		config.Account{ID: "b"},
+		config.Account{ID: "power", SubscriptionType: "POWER", ConcurrencyLimit: &limit},
+		config.Account{ID: "fallback", SubscriptionType: "PRO"},
 	)
 	p.currentIndex = ^uint64(0)
 
 	first, releaseFirst := p.AcquireNextForModelExcluding("model", nil)
-	if first == nil || first.ID != "a" {
-		t.Fatalf("expected first acquire to return a, got %#v", first)
+	if first == nil || first.ID != "power" {
+		t.Fatalf("expected first acquire to return power, got %#v", first)
 	}
 	second, releaseSecond := p.AcquireNextForModelExcluding("model", nil)
-	if second == nil || second.ID != "b" {
-		t.Fatalf("expected second acquire to skip busy a and return b, got %#v", second)
+	if second == nil || second.ID != "fallback" {
+		t.Fatalf("expected busy overridden Power account to be skipped, got %#v", second)
 	}
-	third, releaseThird := p.AcquireNextForModelExcluding("model", nil)
-	if third != nil {
-		t.Fatalf("expected nil when every account is at concurrency limit, got %q", third.ID)
-	}
-	releaseThird()
 
 	releaseFirst()
-	again, releaseAgain := p.AcquireNextForModelExcluding("model", nil)
-	if again == nil || again.ID != "a" {
-		t.Fatalf("expected released account a to be selectable again, got %#v", again)
-	}
-
-	releaseAgain()
 	releaseSecond()
 }
 

@@ -2227,50 +2227,52 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 		stats := statsMap[a.ID]
 
 		result[i] = map[string]interface{}{
-			"id":                  a.ID,
-			"email":               a.Email,
-			"userId":              a.UserId,
-			"nickname":            a.Nickname,
-			"authMethod":          a.AuthMethod,
-			"provider":            a.Provider,
-			"region":              a.Region,
-			"regions":             a.Regions,
-			"regionUsage":         a.RegionUsage,
-			"enabled":             a.Enabled,
-			"banStatus":           a.BanStatus,
-			"banReason":           a.BanReason,
-			"banTime":             a.BanTime,
-			"expiresAt":           a.ExpiresAt,
-			"hasToken":            a.AccessToken != "",
-			"machineId":           a.MachineId,
-			"clientMode":          a.ClientMode,
-			"effectiveClientMode": config.EffectiveClientMode(&a),
-			"weight":              a.Weight,
-			"overageStatus":       a.OverageStatus,
-			"overageCapability":   a.OverageCapability,
-			"overageCap":          a.OverageCap,
-			"overageRate":         a.OverageRate,
-			"currentOverages":     a.CurrentOverages,
-			"overageCheckedAt":    a.OverageCheckedAt,
-			"proxyURL":            a.ProxyURL,
-			"subscriptionType":    a.SubscriptionType,
-			"subscriptionTitle":   a.SubscriptionTitle,
-			"daysRemaining":       a.DaysRemaining,
-			"usageCurrent":        a.UsageCurrent,
-			"usageLimit":          a.UsageLimit,
-			"usagePercent":        a.UsagePercent,
-			"nextResetDate":       a.NextResetDate,
-			"lastRefresh":         a.LastRefresh,
-			"trialUsageCurrent":   a.TrialUsageCurrent,
-			"trialUsageLimit":     a.TrialUsageLimit,
-			"trialUsagePercent":   a.TrialUsagePercent,
-			"trialStatus":         a.TrialStatus,
-			"trialExpiresAt":      a.TrialExpiresAt,
-			"requestCount":        stats.RequestCount,
-			"errorCount":          stats.ErrorCount,
-			"totalTokens":         stats.TotalTokens,
-			"totalCredits":        stats.TotalCredits,
-			"lastUsed":            stats.LastUsed,
+			"id":                        a.ID,
+			"email":                     a.Email,
+			"userId":                    a.UserId,
+			"nickname":                  a.Nickname,
+			"authMethod":                a.AuthMethod,
+			"provider":                  a.Provider,
+			"region":                    a.Region,
+			"regions":                   a.Regions,
+			"regionUsage":               a.RegionUsage,
+			"enabled":                   a.Enabled,
+			"banStatus":                 a.BanStatus,
+			"banReason":                 a.BanReason,
+			"banTime":                   a.BanTime,
+			"expiresAt":                 a.ExpiresAt,
+			"hasToken":                  a.AccessToken != "",
+			"machineId":                 a.MachineId,
+			"clientMode":                a.ClientMode,
+			"effectiveClientMode":       config.EffectiveClientMode(&a),
+			"weight":                    a.Weight,
+			"concurrencyLimit":          a.ConcurrencyLimit,
+			"effectiveConcurrencyLimit": config.EffectiveAccountConcurrencyLimit(&a),
+			"overageStatus":             a.OverageStatus,
+			"overageCapability":         a.OverageCapability,
+			"overageCap":                a.OverageCap,
+			"overageRate":               a.OverageRate,
+			"currentOverages":           a.CurrentOverages,
+			"overageCheckedAt":          a.OverageCheckedAt,
+			"proxyURL":                  a.ProxyURL,
+			"subscriptionType":          a.SubscriptionType,
+			"subscriptionTitle":         a.SubscriptionTitle,
+			"daysRemaining":             a.DaysRemaining,
+			"usageCurrent":              a.UsageCurrent,
+			"usageLimit":                a.UsageLimit,
+			"usagePercent":              a.UsagePercent,
+			"nextResetDate":             a.NextResetDate,
+			"lastRefresh":               a.LastRefresh,
+			"trialUsageCurrent":         a.TrialUsageCurrent,
+			"trialUsageLimit":           a.TrialUsageLimit,
+			"trialUsagePercent":         a.TrialUsagePercent,
+			"trialStatus":               a.TrialStatus,
+			"trialExpiresAt":            a.TrialExpiresAt,
+			"requestCount":              stats.RequestCount,
+			"errorCount":                stats.ErrorCount,
+			"totalTokens":               stats.TotalTokens,
+			"totalCredits":              stats.TotalCredits,
+			"lastUsed":                  stats.LastUsed,
 		}
 	}
 	json.NewEncoder(w).Encode(result)
@@ -2355,6 +2357,22 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	}
 	if v, ok := updates["weight"].(float64); ok {
 		existing.Weight = int(v)
+	}
+	if _, ok := updates["concurrencyLimit"]; ok {
+		switch v := updates["concurrencyLimit"].(type) {
+		case nil:
+			existing.ConcurrencyLimit = nil
+		case float64:
+			limit := int(v)
+			if limit < 0 {
+				limit = 0
+			}
+			existing.ConcurrencyLimit = &limit
+		default:
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Invalid concurrencyLimit, must be number or null"})
+			return
+		}
 	}
 	if v, ok := updates["proxyURL"].(string); ok {
 		existing.ProxyURL = v
@@ -2523,8 +2541,9 @@ func (h *Handler) apiSetAccountOverage(w http.ResponseWriter, r *http.Request, i
 // apiBatchAccounts 批量操作账号（启用/禁用/刷新）
 func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		IDs    []string `json:"ids"`
-		Action string   `json:"action"` // "enable", "disable", "refresh"
+		IDs              []string `json:"ids"`
+		Action           string   `json:"action"` // "enable", "disable", "refresh", "setConcurrency"
+		ConcurrencyLimit *int     `json:"concurrencyLimit"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -2620,6 +2639,16 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 			"refreshed": successCount,
 			"failed":    failCount,
 		})
+
+	case "setConcurrency":
+		count, err := config.UpdateAccountsConcurrencyLimit(req.IDs, req.ConcurrencyLimit)
+		if err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		h.pool.Reload()
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "count": count})
 
 	default:
 		w.WriteHeader(400)
@@ -3015,13 +3044,12 @@ func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"apiKey":                  config.GetApiKey(),
-		"requireApiKey":           config.IsApiKeyRequired(),
-		"port":                    config.GetPort(),
-		"host":                    config.GetHost(),
-		"allowOverUsage":          config.GetAllowOverUsage(),
-		"accountConcurrencyLimit": config.GetAccountConcurrencyLimit(),
-		"clientMode":              config.GetClientMode(),
+		"apiKey":         config.GetApiKey(),
+		"requireApiKey":  config.IsApiKeyRequired(),
+		"port":           config.GetPort(),
+		"host":           config.GetHost(),
+		"allowOverUsage": config.GetAllowOverUsage(),
+		"clientMode":     config.GetClientMode(),
 	})
 }
 
@@ -3070,12 +3098,11 @@ func (h *Handler) apiUpdatePromptFilter(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ApiKey                  *string `json:"apiKey,omitempty"`
-		RequireApiKey           *bool   `json:"requireApiKey,omitempty"`
-		Password                string  `json:"password,omitempty"`
-		AllowOverUsage          *bool   `json:"allowOverUsage,omitempty"`
-		AccountConcurrencyLimit *int    `json:"accountConcurrencyLimit,omitempty"`
-		ClientMode              *string `json:"clientMode,omitempty"`
+		ApiKey         *string `json:"apiKey,omitempty"`
+		RequireApiKey  *bool   `json:"requireApiKey,omitempty"`
+		Password       string  `json:"password,omitempty"`
+		AllowOverUsage *bool   `json:"allowOverUsage,omitempty"`
+		ClientMode     *string `json:"clientMode,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3112,14 +3139,6 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		// Rebuild the pool so over-quota accounts are re-included or dropped immediately.
 		h.pool.Reload()
-	}
-
-	if req.AccountConcurrencyLimit != nil {
-		if err := config.UpdateAccountConcurrencyLimit(*req.AccountConcurrencyLimit); err != nil {
-			w.WriteHeader(500)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
 	}
 
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
@@ -3170,7 +3189,7 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
-	releaseAccount, ok := h.pool.AcquireAccount(account.ID)
+	releaseAccount, ok := h.pool.AcquireAccount(account)
 	if !ok {
 		w.WriteHeader(429)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Account concurrency limit reached"})
